@@ -843,11 +843,12 @@
       });
     });
 
-    function copyPlainText() {
-      if (!currentJob) return;
-      const text = (currentJob.segments || []).map(s => s.text).join(" ");
-      navigator.clipboard.writeText(text);
-      showToast("Transcript copied to clipboard!");
+    async function copyPlainText() {
+      if (!currentJobId) return;
+      const res = await fetch(`/api/jobs/${currentJobId}/export/txt`);
+      const text = await res.text();
+      await navigator.clipboard.writeText(text);
+      showToast("Formatted paragraphs copied to clipboard!");
     }
 
     function downloadExport(fmt) {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from typing import Any
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -177,17 +178,87 @@ def export_vtt(
     return "\n".join(lines).strip() + "\n"
 
 
-def export_txt(segments: list[dict[str, Any]], include_timestamps: bool = False) -> str:
-    if not include_timestamps:
-        return " ".join(str(seg.get("text", "")).strip() for seg in segments if str(seg.get("text", "")).strip()) + "\n"
-    lines: list[str] = []
+def build_turboscribe_paragraphs(
+    segments: list[dict[str, Any]],
+    sentences_per_paragraph: int = 3,
+    max_chars_per_paragraph: int = 280,
+) -> list[dict[str, Any]]:
+    """
+    Group transcript text into clean, TurboScribe-style 2-3 sentence paragraphs
+    with accurate start timestamps for each paragraph.
+    """
+    # Collect sentence chunks with their start times
+    sentences: list[dict[str, Any]] = []
+    sentence_split_re = re.compile(r"(?<=[.!?।۔])\s+")
+
     for seg in segments:
         text = str(seg.get("text", "")).strip()
         if not text:
             continue
-        ts = format_short_time(seg.get("start", 0.0))
-        lines.append(f"[{ts}] {text}")
-    return "\n".join(lines) + "\n"
+        seg_start = float(seg.get("start", 0.0))
+        seg_end = float(seg.get("end", seg_start))
+        parts = [p.strip() for p in sentence_split_re.split(text) if p.strip()]
+        if not parts:
+            continue
+
+        total_chars = max(1, sum(len(p) for p in parts))
+        cursor = seg_start
+        dur = max(0.0, seg_end - seg_start)
+        for p in parts:
+            p_dur = dur * (len(p) / total_chars)
+            # If previous sentence didn't end with terminal punctuation, merge into it
+            if sentences and not re.search(r"[.!?।۔\"'\)\]]$", sentences[-1]["text"]):
+                sentences[-1]["text"] = (sentences[-1]["text"] + " " + p).strip()
+                sentences[-1]["end"] = round(cursor + p_dur, 3)
+            else:
+                sentences.append({
+                    "start": round(cursor, 3),
+                    "end": round(cursor + p_dur, 3),
+                    "text": p,
+                })
+            cursor += p_dur
+
+    paragraphs: list[dict[str, Any]] = []
+    cur_sents: list[dict[str, Any]] = []
+    cur_len = 0
+
+    for sent in sentences:
+        s_text = sent["text"]
+        projected = cur_len + (1 if cur_sents else 0) + len(s_text)
+        # Flush when we hit 3 sentences or exceed character budget (with at least 2 sentences)
+        if cur_sents and (
+            len(cur_sents) >= sentences_per_paragraph
+            or (len(cur_sents) >= 2 and projected > max_chars_per_paragraph)
+        ):
+            paragraphs.append({
+                "start": cur_sents[0]["start"],
+                "end": cur_sents[-1]["end"],
+                "text": " ".join(x["text"] for x in cur_sents),
+            })
+            cur_sents = []
+            cur_len = 0
+
+        cur_sents.append(sent)
+        cur_len += (1 if len(cur_sents) > 1 else 0) + len(s_text)
+
+    if cur_sents:
+        paragraphs.append({
+            "start": cur_sents[0]["start"],
+            "end": cur_sents[-1]["end"],
+            "text": " ".join(x["text"] for x in cur_sents),
+        })
+
+    return paragraphs
+
+
+def export_txt(segments: list[dict[str, Any]], include_timestamps: bool = False) -> str:
+    paragraphs = build_turboscribe_paragraphs(segments)
+    if not paragraphs:
+        return ""
+    if not include_timestamps:
+        return "\n\n".join(p["text"] for p in paragraphs) + "\n"
+    lines = [f"[{format_short_time(p['start'])}] {p['text']}" for p in paragraphs]
+    return "\n\n".join(lines) + "\n"
 
 
 def export_docx(job: dict[str, Any], include_timestamps: bool = True) -> bytes:
@@ -210,14 +281,15 @@ def export_docx(job: dict[str, Any], include_timestamps: bool = True) -> bytes:
 
     doc.add_paragraph("")
 
-    for seg in job.get("segments", []):
-        text = str(seg.get("text", "")).strip()
+    paragraphs = build_turboscribe_paragraphs(job.get("segments", []))
+    for para in paragraphs:
+        text = para["text"]
         if not text:
             continue
         p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.space_after = Pt(8)
         if include_timestamps:
-            ts_run = p.add_run(f"[{format_short_time(seg.get('start', 0.0))}] ")
+            ts_run = p.add_run(f"[{format_short_time(para['start'])}] ")
             ts_run.bold = True
             ts_run.font.size = Pt(10)
             ts_run.font.color.rgb = RGBColor(79, 70, 229)

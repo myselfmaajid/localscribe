@@ -201,7 +201,13 @@ def transcribe_with_whisper(
         "condition_on_previous_text": True,
     }
     if vad_filter:
-        kwargs["vad_parameters"] = {"min_silence_duration_ms": 400}
+        # Sensitive VAD thresholds so soft whispers (e.g. "[whisper] Click.") are preserved
+        kwargs["vad_parameters"] = {
+            "threshold": 0.32,
+            "min_speech_duration_ms": 120,
+            "min_silence_duration_ms": 500,
+            "speech_pad_ms": 300,
+        }
     if initial_prompt and initial_prompt.strip():
         # Strip ElevenLabs stage tags like [thoughtful], [short pause], [whisper]
         cleaned_prompt = re.sub(r"\[[^\]]+\]", " ", initial_prompt)

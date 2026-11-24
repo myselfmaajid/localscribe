@@ -21,6 +21,8 @@ app/data/
 *.mp4
 *.zip
 elevenlab script text.txt
+ElevenLabs*.txt
+my local*.txt
 rea-main/
 
 # OS / IDE
