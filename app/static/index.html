@@ -458,7 +458,8 @@
 
             <div class="toolbar">
               <div class="toolbar-group">
-                <button class="btn-sec active" id="btnModeStandard" onclick="setCaptionView('standard')">Standard Subtitles</button>
+                <button class="btn-sec active" id="btnModeStandard" onclick="setCaptionView('standard')">✅ Complete Sentences (AI Sync)</button>
+                <button class="btn-sec" id="btnModeParagraphs" onclick="setCaptionView('paragraphs')">📄 TurboScribe Paragraphs</button>
                 <button class="btn-sec" id="btnModeShorts" onclick="setCaptionView('shorts')">🎬 Shorts / Reels Captions</button>
                 <button class="btn-sec" onclick="toggleTranslateBox()">🌐 Translate (Gemini)</button>
                 <button class="btn-sec" id="btnSaveEdits" onclick="saveEdits()" style="display:none; border-color:var(--green); color:var(--green);">💾 Save Edits</button>
@@ -766,6 +767,7 @@
     async function setCaptionView(view) {
       captionView = view;
       document.getElementById("btnModeStandard").classList.toggle("active", view === "standard");
+      document.getElementById("btnModeParagraphs").classList.toggle("active", view === "paragraphs");
       document.getElementById("btnModeShorts").classList.toggle("active", view === "shorts");
       document.getElementById("shortsControls").classList.toggle("visible", view === "shorts");
       if (view === "shorts") {
@@ -789,41 +791,56 @@
 
     function renderSegments() {
       const list = document.getElementById("segmentsList");
-      const items = captionView === "shorts" ? shortCuesCache : (currentJob?.segments || []);
+      let items = [];
+      if (captionView === "shorts") {
+        items = shortCuesCache;
+      } else if (captionView === "paragraphs") {
+        items = currentJob?.paragraph_segments || currentJob?.segments || [];
+      } else {
+        items = currentJob?.sentence_segments || currentJob?.segments || [];
+      }
+
       if (!items.length) {
         list.innerHTML = `<div style="padding:18px; color:var(--muted); text-align:center;">No speech detected in this audio.</div>`;
         return;
       }
 
       const editable = captionView === "standard";
-      list.innerHTML = items.map((seg, i) => `
-        <div class="seg-row" data-start="${seg.start}" data-end="${seg.end}">
-          <button class="seg-time" onclick="seekAudio(${seg.start})" title="Click to jump to ${fmtTime(seg.start)}">
-            ${fmtTime(seg.start)} → ${fmtTime(seg.end)}
-          </button>
-          <div class="seg-text" ${editable ? `contenteditable="true" oninput="onSegEdit(${i}, this.innerText)"` : ""}>${escapeHtml(seg.text)}</div>
-        </div>
-      `).join("");
+      list.innerHTML = items.map((seg, i) => {
+        const dur = Math.max(0, (Number(seg.end) || 0) - (Number(seg.start) || 0)).toFixed(1);
+        return `
+          <div class="seg-row" data-start="${seg.start}" data-end="${seg.end}">
+            <button class="seg-time" onclick="seekAudio(${seg.start})" title="Click to jump to ${fmtTime(seg.start)} (${dur}s)">
+              ${fmtTime(seg.start)} → ${fmtTime(seg.end)} <span style="opacity:0.75;">(${dur}s)</span>
+            </button>
+            <div class="seg-text" ${editable ? `contenteditable="true" oninput="onSegEdit(${i}, this.innerText)"` : ""}>${escapeHtml(seg.text)}</div>
+          </div>
+        `;
+      }).join("");
     }
 
     function onSegEdit(idx, newText) {
-      if (!currentJob || !currentJob.segments[idx]) return;
-      currentJob.segments[idx].text = newText.trim();
+      if (!currentJob) return;
+      const list = currentJob.sentence_segments || currentJob.segments;
+      if (!list || !list[idx]) return;
+      list[idx].text = newText.trim();
       dirtyEdits = true;
       document.getElementById("btnSaveEdits").style.display = "inline-flex";
     }
 
     async function saveEdits() {
       if (!currentJobId || !currentJob) return;
+      const toSave = currentJob.sentence_segments || currentJob.segments;
       const res = await fetch(`/api/jobs/${currentJobId}/segments`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segments: currentJob.segments }),
+        body: JSON.stringify({ segments: toSave }),
       });
       if (res.ok) {
         dirtyEdits = false;
         document.getElementById("btnSaveEdits").style.display = "none";
-        showToast("Edits saved! Exports will use your updated text.");
+        await fetchAndRenderJob(currentJobId, false);
+        showToast("Edits saved! All exports will use your updated text.");
       }
     }
 

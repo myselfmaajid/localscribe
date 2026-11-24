@@ -133,6 +133,128 @@ def build_short_caption_segments(
     return cues
 
 
+_ABBREVS = {
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "st.", "vs.",
+    "etc.", "e.g.", "i.e.", "u.s.", "u.k.", "a.m.", "p.m.", "no.",
+}
+
+
+def _is_sentence_end(token: str) -> bool:
+    t = token.strip()
+    if not t:
+        return False
+    stripped = t.rstrip("\"'”’)]}")
+    if not stripped:
+        return False
+    if stripped[-1] not in ".!?।۔":
+        return False
+    if stripped.lower() in _ABBREVS:
+        return False
+    # Ignore single-letter initials like "J." or "A."
+    if len(stripped) == 2 and stripped[0].isalpha() and stripped[1] == ".":
+        return False
+    return True
+
+
+def build_sentence_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Re-segment transcript into 100% complete, meaningful sentences using exact
+    word-level timestamps (never cutting mid-sentence). Ideal for AI video/image
+    clip syncing and clean TurboScribe-style SRT/VTT subtitles.
+    """
+    all_words: list[dict[str, Any]] = []
+    has_any_words = any(seg.get("words") for seg in segments)
+
+    if has_any_words:
+        for seg in segments:
+            words = seg.get("words") or []
+            if words:
+                for w in words:
+                    wt = str(w.get("word", "")).strip()
+                    if wt:
+                        all_words.append({
+                            "start": round(float(w["start"]), 3),
+                            "end": round(float(w["end"]), 3),
+                            "word": wt,
+                        })
+            else:
+                text = str(seg.get("text", "")).strip()
+                if not text:
+                    continue
+                tokens = text.split()
+                st = float(seg.get("start", 0.0))
+                en = float(seg.get("end", st + 1.0))
+                step = max(0.05, (en - st) / max(1, len(tokens)))
+                for idx, tok in enumerate(tokens):
+                    all_words.append({
+                        "start": round(st + idx * step, 3),
+                        "end": round(min(en, st + (idx + 1) * step), 3),
+                        "word": tok,
+                    })
+
+        sentences: list[dict[str, Any]] = []
+        buf: list[dict[str, Any]] = []
+        for w in all_words:
+            buf.append(w)
+            if _is_sentence_end(w["word"]):
+                st = buf[0]["start"]
+                en = buf[-1]["end"]
+                sentences.append({
+                    "id": len(sentences) + 1,
+                    "start": st,
+                    "end": en,
+                    "duration": round(max(0.0, en - st), 2),
+                    "text": " ".join(x["word"] for x in buf),
+                    "words": list(buf),
+                })
+                buf = []
+        if buf:
+            st = buf[0]["start"]
+            en = buf[-1]["end"]
+            sentences.append({
+                "id": len(sentences) + 1,
+                "start": st,
+                "end": en,
+                "duration": round(max(0.0, en - st), 2),
+                "text": " ".join(x["word"] for x in buf),
+                "words": list(buf),
+            })
+        return sentences
+
+    # Fallback when word-level timestamps are absent (e.g., Gemini mode or edited segments)
+    sentence_split_re = re.compile(r"(?<=[.!?।۔])\s+")
+    sentences = []
+    for seg in segments:
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        seg_start = float(seg.get("start", 0.0))
+        seg_end = float(seg.get("end", seg_start + 1.0))
+        parts = [p.strip() for p in sentence_split_re.split(text) if p.strip()]
+        total_chars = max(1, sum(len(p) for p in parts))
+        cursor = seg_start
+        dur = max(0.0, seg_end - seg_start)
+        for p in parts:
+            p_dur = dur * (len(p) / total_chars)
+            if sentences and not _is_sentence_end(sentences[-1]["text"].split()[-1]):
+                sentences[-1]["text"] = (sentences[-1]["text"] + " " + p).strip()
+                sentences[-1]["end"] = round(cursor + p_dur, 3)
+                sentences[-1]["duration"] = round(max(0.0, sentences[-1]["end"] - sentences[-1]["start"]), 2)
+            else:
+                st = round(cursor, 3)
+                en = round(cursor + p_dur, 3)
+                sentences.append({
+                    "id": len(sentences) + 1,
+                    "start": st,
+                    "end": en,
+                    "duration": round(max(0.0, en - st), 2),
+                    "text": p,
+                    "words": [],
+                })
+            cursor += p_dur
+    return sentences
+
+
 def export_srt(
     segments: list[dict[str, Any]],
     short_mode: bool = False,
@@ -142,8 +264,8 @@ def export_srt(
     if short_mode:
         items = build_short_caption_segments(segments, max_words, max_chars)
     else:
-        # Split long Whisper 20-30s chunks into clean, TurboScribe-style subtitle cues
-        items = build_short_caption_segments(segments, max_words=14, max_chars=82)
+        # Complete, meaningful sentences with exact word-level start & end timestamps
+        items = build_sentence_segments(segments)
     lines: list[str] = []
     idx = 1
     for seg in items:
@@ -166,7 +288,7 @@ def export_vtt(
     if short_mode:
         items = build_short_caption_segments(segments, max_words, max_chars)
     else:
-        items = build_short_caption_segments(segments, max_words=14, max_chars=82)
+        items = build_sentence_segments(segments)
     lines: list[str] = ["WEBVTT\n"]
     for seg in items:
         text = str(seg.get("text", "")).strip()
@@ -184,40 +306,10 @@ def build_turboscribe_paragraphs(
     max_chars_per_paragraph: int = 280,
 ) -> list[dict[str, Any]]:
     """
-    Group transcript text into clean, TurboScribe-style 2-3 sentence paragraphs
-    with accurate start timestamps for each paragraph.
+    Group exact word-synced complete sentences into clean, TurboScribe-style
+    2-3 sentence paragraphs with exact start & end timestamps.
     """
-    # Collect sentence chunks with their start times
-    sentences: list[dict[str, Any]] = []
-    sentence_split_re = re.compile(r"(?<=[.!?।۔])\s+")
-
-    for seg in segments:
-        text = str(seg.get("text", "")).strip()
-        if not text:
-            continue
-        seg_start = float(seg.get("start", 0.0))
-        seg_end = float(seg.get("end", seg_start))
-        parts = [p.strip() for p in sentence_split_re.split(text) if p.strip()]
-        if not parts:
-            continue
-
-        total_chars = max(1, sum(len(p) for p in parts))
-        cursor = seg_start
-        dur = max(0.0, seg_end - seg_start)
-        for p in parts:
-            p_dur = dur * (len(p) / total_chars)
-            # If previous sentence didn't end with terminal punctuation, merge into it
-            if sentences and not re.search(r"[.!?।۔\"'\)\]]$", sentences[-1]["text"]):
-                sentences[-1]["text"] = (sentences[-1]["text"] + " " + p).strip()
-                sentences[-1]["end"] = round(cursor + p_dur, 3)
-            else:
-                sentences.append({
-                    "start": round(cursor, 3),
-                    "end": round(cursor + p_dur, 3),
-                    "text": p,
-                })
-            cursor += p_dur
-
+    sentences = build_sentence_segments(segments)
     paragraphs: list[dict[str, Any]] = []
     cur_sents: list[dict[str, Any]] = []
     cur_len = 0
@@ -225,14 +317,17 @@ def build_turboscribe_paragraphs(
     for sent in sentences:
         s_text = sent["text"]
         projected = cur_len + (1 if cur_sents else 0) + len(s_text)
-        # Flush when we hit 3 sentences or exceed character budget (with at least 2 sentences)
         if cur_sents and (
             len(cur_sents) >= sentences_per_paragraph
             or (len(cur_sents) >= 2 and projected > max_chars_per_paragraph)
         ):
+            st = cur_sents[0]["start"]
+            en = cur_sents[-1]["end"]
             paragraphs.append({
-                "start": cur_sents[0]["start"],
-                "end": cur_sents[-1]["end"],
+                "id": len(paragraphs) + 1,
+                "start": st,
+                "end": en,
+                "duration": round(max(0.0, en - st), 2),
                 "text": " ".join(x["text"] for x in cur_sents),
             })
             cur_sents = []
@@ -242,9 +337,13 @@ def build_turboscribe_paragraphs(
         cur_len += (1 if len(cur_sents) > 1 else 0) + len(s_text)
 
     if cur_sents:
+        st = cur_sents[0]["start"]
+        en = cur_sents[-1]["end"]
         paragraphs.append({
-            "start": cur_sents[0]["start"],
-            "end": cur_sents[-1]["end"],
+            "id": len(paragraphs) + 1,
+            "start": st,
+            "end": en,
+            "duration": round(max(0.0, en - st), 2),
             "text": " ".join(x["text"] for x in cur_sents),
         })
 
@@ -252,13 +351,21 @@ def build_turboscribe_paragraphs(
 
 
 def export_txt(segments: list[dict[str, Any]], include_timestamps: bool = False) -> str:
-    paragraphs = build_turboscribe_paragraphs(segments)
-    if not paragraphs:
-        return ""
     if not include_timestamps:
+        paragraphs = build_turboscribe_paragraphs(segments)
+        if not paragraphs:
+            return ""
         return "\n\n".join(p["text"] for p in paragraphs) + "\n"
-    lines = [f"[{format_short_time(p['start'])}] {p['text']}" for p in paragraphs]
-    return "\n\n".join(lines) + "\n"
+
+    # Timestamped TXT: one complete sentence per line with exact start -> end & duration
+    sentences = build_sentence_segments(segments)
+    if not sentences:
+        return ""
+    lines = [
+        f"[{format_short_time(s['start'])} --> {format_short_time(s['end'])}] ({s['duration']:.1f}s) {s['text']}"
+        for s in sentences
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def export_docx(job: dict[str, Any], include_timestamps: bool = True) -> bytes:
