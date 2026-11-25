@@ -11,10 +11,18 @@ env/
 .env
 .env.*
 
-# Runtime app data (uploaded audio & local job history)
+# Runtime app data (uploaded documents, audio, SQLite diagnostic logs & local job history)
 app/data/
+turnitin/app/data/
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+*.log
 
-# Personal sample files & unrelated downloads
+# Private sample documents & local test folders
+textul/
+i love pdf/
 *.mp3
 *.wav
 *.m4a
